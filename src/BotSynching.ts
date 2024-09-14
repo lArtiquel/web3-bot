@@ -1,19 +1,21 @@
-require('dotenv').config();
-const Web3 = require('web3');
-const ethers = require('ethers');
+import { config } from 'dotenv';
+import { ethers } from 'ethers';
+
+// Load environment variables
+config();
 
 // Environment variables
-const INFURA_API_KEY = process.env.INFURA_API_KEY;
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
-const START_BLOCK = process.env.START_BLOCK;
+const INFURA_API_KEY = process.env.INFURA_API_KEY!;
+const PRIVATE_KEY = process.env.PRIVATE_KEY!;
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS!;
+const START_BLOCK = Number(process.env.START_BLOCK);
 
-// Setup Web3 provider and contract
-const provider = new ethers.providers.InfuraProvider('sepolia', INFURA_API_KEY);
+// Setup provider and wallet
+const provider = new ethers.providers.JsonRpcProvider(`https://sepolia.infura.io/v3/${INFURA_API_KEY}`);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 const contractABI = [
-  "event Ping()",
+  "event Ping(bytes32 hash)",
   "function pong(bytes32 hash) public"
 ];
 
@@ -21,15 +23,17 @@ const contract = new ethers.Contract(CONTRACT_ADDRESS, contractABI, wallet);
 
 async function listenToPingEvents() {
     console.log(`Starting to listen for Ping events from block ${START_BLOCK}...`);
-    const startingBlock = Number(START_BLOCK);
 
     provider.on('block', async (blockNumber) => {
         try {
+            // Compute the event signature hash
+            const pingEventSignature = ethers.utils.id("Ping(bytes32)");
+
             const logs = await provider.getLogs({
                 address: CONTRACT_ADDRESS,
-                fromBlock: startingBlock,
-                toBlock: 'latest',
-                topics: [ethers.utils.id("Ping()")]
+                fromBlock: START_BLOCK,
+                toBlock: blockNumber,
+                topics: [pingEventSignature]
             });
 
             for (let log of logs) {
@@ -41,25 +45,21 @@ async function listenToPingEvents() {
                     console.log(`Pong sent for tx: ${transactionHash}, mined in block: ${tx.blockNumber}`);
                 } catch (error) {
                     console.error(`Error sending pong for tx ${transactionHash}:`, error);
-                    // Handle errors (e.g., retry logic, logging)
                 }
             }
         } catch (error) {
             console.error(`Error fetching logs:`, error);
-            // Handle provider errors, potentially retrying
         }
-    });
-
-    provider._websocket.on('close', () => {
-        console.error('WebSocket closed, reconnecting...');
-        setTimeout(listenToPingEvents, 1000); // Reconnect with a delay
-    });
-
-    provider._websocket.on('error', (error) => {
-        console.error('WebSocket error:', error);
-        setTimeout(listenToPingEvents, 1000); // Reconnect on error
     });
 }
 
+// Function to handle reconnection logic
+function handleReconnection() {
+    console.error('Reconnecting...');
+    setTimeout(() => {
+        listenToPingEvents().catch(console.error);
+    }, 1000);
+}
+
 // Start listening to Ping events
-listenToPingEvents();
+listenToPingEvents().catch(handleReconnection);
