@@ -2,3 +2,4 @@
 .env
 node_modules/
 bot_state.json
+/dist
