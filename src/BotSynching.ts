@@ -75,8 +75,9 @@ async function listenToPingEvents() {
 // Send pong transaction and handle nonce management
 async function sendPong(transactionHash: string) {
     try {
+        const currentNonce = await wallet.getTransactionCount("pending");
         const tx = await contract.pong(transactionHash, {
-            nonce: botState.nonce,
+            nonce: currentNonce, // Use dynamic nonce
             gasPrice: await provider.getGasPrice()
         });
         console.log(`Pong sent for tx: ${transactionHash}`);
