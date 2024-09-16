@@ -28,7 +28,8 @@ const contract = new ethers.Contract(CONTRACT_ADDRESS, contractABI, wallet);
 // Load or initialize bot state (nonce and last processed block)
 let botState = {
     latestProcessedBlock: START_BLOCK,
-    nonce: 0
+    nonce: 0,
+    processedTransactions: [] as string[]  // Track processed transaction hashes
 };
 
 if (fs.existsSync(PERSISTENT_FILE)) {
@@ -42,6 +43,7 @@ function persistState() {
 
 // Flag to prevent multiple listeners
 let listening = false;
+const processedTransactionsSet = new Set(botState.processedTransactions);  // Set to avoid duplicates
 
 // Listen to Ping events and send pong transactions
 async function listenToPingEvents() {
@@ -53,18 +55,28 @@ async function listenToPingEvents() {
     provider.on('block', async (blockNumber) => {
         try {
             if (blockNumber > botState.latestProcessedBlock) {
-                const logs = await provider.getLogs({
-                    address: CONTRACT_ADDRESS,
-                    fromBlock: botState.latestProcessedBlock + 1,
-                    toBlock: blockNumber,
-                    topics: [ethers.utils.id("Ping()")]
-                });
+                const batchSize = 10; // Smaller block range for eth_getLogs requests
+                let fromBlock = botState.latestProcessedBlock + 1;
+                
+                // Process logs in small batches
+                while (fromBlock <= blockNumber) {
+                    const toBlock = Math.min(fromBlock + batchSize - 1, blockNumber);
+                    
+                    const logs = await provider.getLogs({
+                        address: CONTRACT_ADDRESS,
+                        fromBlock: fromBlock,
+                        toBlock: toBlock,
+                        topics: [ethers.utils.id("Ping()")]
+                    });
 
-                for (let log of logs) {
-                    const transactionHash = log.transactionHash;
+                    for (let log of logs) {
+                        const transactionHash = log.transactionHash;
 
-                    // Send pong transaction
-                    await sendPong(transactionHash);
+                        // Send pong transaction if not already processed
+                        await sendPong(transactionHash);
+                    }
+
+                    fromBlock = toBlock + 1; // Move to the next batch
                 }
 
                 // Update latest processed block
@@ -82,6 +94,12 @@ async function listenToPingEvents() {
 
 // Send pong transaction and handle nonce management
 async function sendPong(transactionHash: string) {
+    // Avoid sending duplicate pong transactions
+    if (processedTransactionsSet.has(transactionHash)) {
+        console.log(`Transaction already processed: ${transactionHash}`);
+        return;
+    }
+
     try {
         const currentNonce = await wallet.getTransactionCount("pending");
         const tx = await contract.pong(transactionHash, {
@@ -92,7 +110,9 @@ async function sendPong(transactionHash: string) {
         const txReceipt = await tx.wait();
         console.log(`Transaction mined in block ${txReceipt.blockNumber}`);
 
-        // Increment nonce and persist state
+        // Mark transaction as processed
+        processedTransactionsSet.add(transactionHash);
+        botState.processedTransactions.push(transactionHash);  // Store in persistent state
         botState.nonce++;
         persistState();
     } catch (error) {
