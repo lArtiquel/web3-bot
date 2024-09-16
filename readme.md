@@ -84,3 +84,75 @@ Think about what types of failures can happen to the bot and defend against it. 
     ```bash
     npm run startBot
     ```
+
+
+## Solutions tracking backlog (to not forget what I did xD)
+
+#### 1. **Batching `eth_getLogs` Requests:**
+   - **Problem:** Large block ranges caused `eth_getLogs` requests to time out.
+   - **Solution:** Introduced a batching mechanism to process logs in smaller batches (10 blocks at a time). This ensures that the bot is not overwhelmed by large log responses.
+   
+   ```typescript
+   const batchSize = 10; // Smaller block range for eth_getLogs requests
+   let fromBlock = botState.latestProcessedBlock + 1;
+   
+   while (fromBlock <= blockNumber) {
+       const toBlock = Math.min(fromBlock + batchSize - 1, blockNumber);
+       const logs = await provider.getLogs({
+           address: CONTRACT_ADDRESS,
+           fromBlock: fromBlock,
+           toBlock: toBlock,
+           topics: [ethers.utils.id("Ping()")]
+       });
+       fromBlock = toBlock + 1;
+   }
+   ```
+
+#### 2. **Duplicate Handling (Prevent Duplicate `pong()`):**
+   - **Problem:** The bot was sending multiple `pong()` transactions for the same `Ping()`.
+   - **Solution:** A `Set` is used to track processed transaction hashes. Each time a `Ping()` event is detected, the bot checks if the transaction has already been processed. If it has, it skips sending another `pong()` for that transaction.
+   
+   ```typescript
+   const processedTransactionsSet = new Set(botState.processedTransactions);
+
+   if (processedTransactionsSet.has(transactionHash)) {
+       console.log(`Transaction already processed: ${transactionHash}`);
+       return;
+   }
+
+   // After successful transaction:
+   processedTransactionsSet.add(transactionHash);
+   botState.processedTransactions.push(transactionHash);
+   ```
+
+#### 3. **Nonce Management and Pending Transactions:**
+   - **Problem:** Nonce mismanagement could cause conflicting transactions or skipped `pong()` calls.
+   - **Solution:** The bot dynamically fetches the current nonce with `wallet.getTransactionCount("pending")` before sending a transaction. This ensures that the bot doesn't use stale or conflicting nonces.
+
+   ```typescript
+   const currentNonce = await wallet.getTransactionCount("pending");
+   const tx = await contract.pong(transactionHash, {
+       nonce: currentNonce, // Use dynamic nonce
+       gasPrice: await provider.getGasPrice()
+   });
+   ```
+
+#### 4. **Improved Error Handling and Reconnection:**
+   - **Problem:** The bot was reconnecting too quickly and possibly flooding requests when errors occurred.
+   - **Solution:** Implemented exponential backoff for reconnections with a delay that grows with each failed attempt. This prevents overwhelming the provider and improves stability.
+   
+   ```typescript
+   const delay = Math.min(1000 * 2 ** attempt, 30000); // Max delay of 30 seconds
+   setTimeout(async () => {
+       handleReconnection(attempt + 1); // Increment attempt if it fails
+   }, delay);
+   ```
+
+#### 5. **Persistent State:**
+   - **Problem:** Bot needed to resume from where it left off and track processed transactions and nonces persistently.
+   - **Solution:** The bot saves processed transaction hashes and nonce into `botState` and persists it in a JSON file to ensure it can resume correctly after restarts.
+   
+   ```typescript
+   botState.processedTransactions.push(transactionHash);
+   persistState();
+   ```
