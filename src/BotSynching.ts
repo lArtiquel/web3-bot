@@ -40,8 +40,14 @@ function persistState() {
     fs.writeFileSync(PERSISTENT_FILE, JSON.stringify(botState));
 }
 
+// Flag to prevent multiple listeners
+let listening = false;
+
 // Listen to Ping events and send pong transactions
 async function listenToPingEvents() {
+    if (listening) return; // Prevent multiple listeners
+    listening = true;
+
     console.log(`Starting to listen for Ping events from block ${botState.latestProcessedBlock}...`);
 
     provider.on('block', async (blockNumber) => {
@@ -67,7 +73,9 @@ async function listenToPingEvents() {
             }
         } catch (error) {
             console.error('Error fetching logs:', error);
-            handleReconnection(); // Retry if there is an error fetching logs
+            listening = false; // Allow reconnection
+            provider.removeAllListeners('block'); // Clear listeners to avoid stacking
+            handleReconnection(); // Retry on error
         }
     });
 }
@@ -89,23 +97,27 @@ async function sendPong(transactionHash: string) {
         persistState();
     } catch (error) {
         console.error(`Error sending pong for tx ${transactionHash}:`, error);
-        handleReconnection(); // Retry if the transaction fails
+        handleReconnection(); // Retry on failure
     }
 }
 
 // Handle reconnection logic with exponential backoff
 function handleReconnection(attempt = 1) {
     const delay = Math.min(1000 * 2 ** attempt, 30000); // Exponential backoff with a max delay of 30 seconds
-    setTimeout(() => {
+    setTimeout(async () => {
         console.log(`Reconnecting, attempt ${attempt}`);
-        listenToPingEvents().catch((error) => {
+        try {
+            await listenToPingEvents(); // Re-establish listener
+            console.log('Reconnected successfully');
+        } catch (error) {
             console.error('Reconnection failed, retrying:', error);
-            handleReconnection(attempt + 1);
-        });
+            handleReconnection(attempt + 1); // Increment attempt if it fails
+        }
     }, delay);
 }
 
 // Start listening to Ping events
 listenToPingEvents().catch((error) => {
     console.error('Error starting event listener:', error);
+    handleReconnection(); // Retry if the initial connection fails
 });
