@@ -89,8 +89,8 @@ async function sendPong(transactionHash: string) {
             gasPrice: await provider.getGasPrice()
         });
         console.log(`Pong sent for tx: ${transactionHash}`);
-        await tx.wait();
-        console.log(`Transaction mined in block ${tx.blockNumber}`);
+        const txReceipt = await tx.wait();
+        console.log(`Transaction mined in block ${txReceipt.blockNumber}`);
 
         // Increment nonce and persist state
         botState.nonce++;
