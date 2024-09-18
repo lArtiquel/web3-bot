@@ -27,13 +27,19 @@ const contract = new ethers.Contract(CONTRACT_ADDRESS, contractABI, wallet);
 
 // Load or initialize bot state (nonce and last processed block)
 let botState = {
-    latestProcessedBlock: START_BLOCK,
-    nonce: 0,
-    processedTransactions: [] as string[]  // Track processed transaction hashes
+    latestProcessedBlock: START_BLOCK
 };
 
 if (fs.existsSync(PERSISTENT_FILE)) {
-    botState = JSON.parse(fs.readFileSync(PERSISTENT_FILE, 'utf-8'));
+    try {
+        const stateData = fs.readFileSync(PERSISTENT_FILE, 'utf-8');
+        if (stateData) {
+            botState = JSON.parse(stateData);
+        }
+    } catch (error) {
+        console.error('Error reading or parsing state file:', error);
+        botState.latestProcessedBlock = START_BLOCK;  // Fallback to env variable
+    }
 }
 
 // Function to persist bot state to file
@@ -41,67 +47,68 @@ function persistState() {
     fs.writeFileSync(PERSISTENT_FILE, JSON.stringify(botState));
 }
 
-// Flag to prevent multiple listeners
-let listening = false;
-const processedTransactionsSet = new Set(botState.processedTransactions);  // Set to avoid duplicates
+// Function to retrieve missed Ping events from historical logs
+async function retrieveHistoricalLogs() {
+
+    const currentBlock = await provider.getBlockNumber();
+    let fromBlock = botState.latestProcessedBlock + 1;
+    const batchSize = 50; // Smaller block range for eth_getLogs requests
+
+    while (fromBlock <= currentBlock) {
+        const toBlock = Math.min(fromBlock + batchSize - 1, currentBlock);
+
+        const logs = await provider.getLogs({
+            address: CONTRACT_ADDRESS,
+            fromBlock: fromBlock,
+            toBlock: toBlock,
+            topics: [ethers.utils.id("Ping()")]
+        });
+
+        for (const log of logs) {
+            const transactionHash = log.transactionHash;
+
+            console.log(`Historical Ping event detected for tx: ${transactionHash}`);
+            await sendPong(transactionHash);
+        }
+
+        fromBlock = toBlock + 1; // Move to the next batch
+    }
+
+    // update current block in the persistent state
+    botState.latestProcessedBlock = currentBlock;
+    persistState();
+}
 
 // Listen to Ping events and send pong transactions
 async function listenToPingEvents() {
-    if (listening) return; // Prevent multiple listeners
-    listening = true;
-
     console.log(`Starting to listen for Ping events from block ${botState.latestProcessedBlock}...`);
 
-    provider.on('block', async (blockNumber) => {
-        try {
-            if (blockNumber > botState.latestProcessedBlock) {
-                const batchSize = 10; // Smaller block range for eth_getLogs requests
-                let fromBlock = botState.latestProcessedBlock + 1;
-                
-                // Process logs in small batches
-                while (fromBlock <= blockNumber) {
-                    const toBlock = Math.min(fromBlock + batchSize - 1, blockNumber);
-                    
-                    const logs = await provider.getLogs({
-                        address: CONTRACT_ADDRESS,
-                        fromBlock: fromBlock,
-                        toBlock: toBlock,
-                        topics: [ethers.utils.id("Ping()")]
-                    });
+    // Retrieve missed logs after reconnecting
+    await retrieveHistoricalLogs();
 
-                    for (let log of logs) {
-                        const transactionHash = log.transactionHash;
+    // Listen to new Ping events
+    contract.on("Ping", async (event) => {
+        const transactionHash = event.transactionHash;
+        const blockNumber = event.blockNumber;  // Capture the block number from the event
+    
+        console.log(`New Ping event detected for tx: ${transactionHash}`);
+        await sendPong(transactionHash);
+    
+        // Update the latest processed block to the block number of the event
+        botState.latestProcessedBlock = blockNumber;
+        persistState();
+    });    
 
-                        // Send pong transaction if not already processed
-                        await sendPong(transactionHash);
-                    }
+    // Log successful connection
+    console.log('Successfully listening for Ping events.');
 
-                    fromBlock = toBlock + 1; // Move to the next batch
-                }
-
-                // Update latest processed block
-                botState.latestProcessedBlock = blockNumber;
-                persistState();
-            }
-        } catch (error) {
-            console.error('Error fetching logs:', error);
-            listening = false; // Allow reconnection
-            provider.removeAllListeners('block'); // Clear listeners to avoid stacking
-            handleReconnection(); // Retry on error
-        }
-    });
 }
 
 // Send pong transaction and handle nonce management
 async function sendPong(transactionHash: string) {
-    // Avoid sending duplicate pong transactions
-    if (processedTransactionsSet.has(transactionHash)) {
-        console.log(`Transaction already processed: ${transactionHash}`);
-        return;
-    }
-
     try {
-        const currentNonce = await wallet.getTransactionCount("pending");
+        let currentNonce = await wallet.getTransactionCount("pending");
+        console.log(`Current nonce: ${currentNonce}`);
         const tx = await contract.pong(transactionHash, {
             nonce: currentNonce, // Use dynamic nonce
             gasPrice: await provider.getGasPrice()
@@ -109,16 +116,10 @@ async function sendPong(transactionHash: string) {
         console.log(`Pong sent for tx: ${transactionHash}`);
         const txReceipt = await tx.wait();
         console.log(`Transaction mined in block ${txReceipt.blockNumber}`);
-
-        // Mark transaction as processed
-        processedTransactionsSet.add(transactionHash);
-        botState.processedTransactions.push(transactionHash);  // Store in persistent state
-        botState.nonce++;
-        persistState();
     } catch (error) {
         console.error(`Error sending pong for tx ${transactionHash}:`, error);
         handleReconnection(); // Retry on failure
-    }
+    } 
 }
 
 // Handle reconnection logic with exponential backoff
@@ -127,6 +128,8 @@ function handleReconnection(attempt = 1) {
     setTimeout(async () => {
         console.log(`Reconnecting, attempt ${attempt}`);
         try {
+            // Remove old listeners to avoid duplicates before reconnecting
+            contract.removeAllListeners();
             await listenToPingEvents(); // Re-establish listener
             console.log('Reconnected successfully');
         } catch (error) {
