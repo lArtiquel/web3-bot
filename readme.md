@@ -1,5 +1,3 @@
-Kleros tasks (SRE/Back-end)
-
 ---
 
 # Bot Syncing
